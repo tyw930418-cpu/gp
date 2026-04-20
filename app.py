@@ -6,10 +6,20 @@ from plotly.subplots import make_subplots
 import time
 import random
 
-# --- 1. 配置与授权 ---
-st.set_page_config(page_title="NIQING | 行业金叉监控", layout="wide")
-st.markdown("<style>.stApp { background-color: #0b0e14; color: #e0e0e0; }</style>", unsafe_allow_html=True)
+# --- 1. 终端视觉与基础配置 ---
+st.set_page_config(page_title="NIQING | 行业金叉雷达", layout="wide")
 
+st.markdown("""
+    <style>
+    .stApp { background-color: #0b0e14; color: #e0e0e0; }
+    .stHeader { background-color: #1a1c23; }
+    .gold-text { color: #d4af37 !important; font-weight: bold; }
+    .stButton>button { border: 1px solid #d4af37; color: #d4af37; background: transparent; width: 100%; }
+    .stButton>button:hover { background-color: #d4af37; color: black; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. 授权验证 ---
 if "auth" not in st.session_state:
     st.markdown("<h2 style='text-align: center; color: #d4af37;'>NIQING STUDIO 策略终端</h2>", unsafe_allow_html=True)
     if st.text_input("授权令牌", type="password") == "niqing888":
@@ -17,133 +27,125 @@ if "auth" not in st.session_state:
         st.rerun()
     st.stop()
 
-# --- 2. 核心引擎 ---
-class ProEngine:
+# --- 3. 核心计算类 (整合 NIQING 引擎) ---
+class NIQINGEngine:
     @staticmethod
     def safe_fetch(func, **kwargs):
+        """稳健抓取，带重试机制"""
         for _ in range(3):
             try:
-                time.sleep(random.uniform(0.2, 0.5))
+                time.sleep(random.uniform(0.3, 0.6))
                 return func(**kwargs)
-            except: time.sleep(1)
+            except:
+                time.sleep(1)
         return pd.DataFrame()
 
     @staticmethod
     def calc_kdj(df):
+        """计算 KDJ 指标"""
+        if df.empty: return df
         low_9 = df['最低'].rolling(9).min()
         high_9 = df['最高'].rolling(9).max()
-        rsv = (df['收盘'] - low_9) / (high_9 - low_9) * 100
+        # 避免除以0
+        rsv = (df['收盘'] - low_9) / (high_9 - low_9 + 0.001) * 100
         df['K'] = rsv.ewm(com=2, adjust=False).mean()
         df['D'] = df['K'].ewm(com=2, adjust=False).mean()
         df['J'] = 3 * df['K'] - 2 * df['D']
         return df
 
-# --- 3. UI 界面布局 ---
-st.title("妮情 · 行业分类与金叉预警")
+# --- 4. UI 交互布局 ---
+st.title("妮情 · 行业分类与金叉实时预警")
 
 # 侧边栏：行业选择
-st.sidebar.header("📂 市场筛选")
-# 预设一些热门行业，或者你可以留空让它自动获取
-industry_list = ["半导体", "电力行业", "通信设备", "汽车整车", "酿酒行业", "生物制品", "互联网服务"]
-selected_industry = st.sidebar.selectbox("选择目标行业", industry_list)
+st.sidebar.markdown("### 📂 市场筛选")
+# 你可以在这里自行添加更多行业名称
+industry_list = ["半导体", "通信设备", "电力行业", "汽车整车", "酿酒行业", "生物制品", "软件开发", "光伏设备", "房地产", "银行"]
+selected_industry = st.sidebar.selectbox("1. 选择目标行业", industry_list)
 
-# 核心容器
-col_list, col_chart = st.columns([1, 2])
+# 主界面分为左右两栏
+col_list, col_chart = st.columns([1, 2.5])
 
 with col_list:
-    st.subheader(f"📍 {selected_industry} 成员")
-    if st.button("同步行业数据"):
-        # 获取行业板块成员
-        df_ind = ProEngine.safe_fetch(ak.stock_board_industry_cons_em, symbol=selected_industry)
-        if not df_ind.empty:
-            st.session_state.ind_data = df_ind[['代码', '名称', '最新价', '涨跌幅']]
-        else:
-            st.error("行业数据同步失败")
+    st.markdown(f"#### 📍 {selected_industry} 板块")
     
+    # 行业同步按钮
+    if st.button("🔄 同步行业成员数据"):
+        with st.spinner("获取中..."):
+            df_ind = NIQINGEngine.safe_fetch(ak.stock_board_industry_cons_em, symbol=selected_industry)
+            if not df_ind.empty:
+                st.session_state.ind_data = df_ind[['代码', '名称', '最新价', '涨跌幅']]
+                st.success("同步成功")
+            else:
+                st.error("无法获取行业数据，请稍后重试")
+
+    # 股票选择器
     if "ind_data" in st.session_state:
-        # 在界面上让用户选择具体股票
-        selected_stock_name = st.selectbox("选择个股进行金叉检测", st.session_state.ind_data['名称'].tolist())
+        stock_options = st.session_state.ind_data['名称'].tolist()
+        selected_stock_name = st.selectbox("2. 选择个股进行检测", stock_options)
+        
+        # 获取对应代码
         target_code = st.session_state.ind_data[st.session_state.ind_data['名称'] == selected_stock_name]['代码'].values[0]
-        st.write(f"已选中：{selected_stock_name} ({target_code})")
+        
+        # 显示选中的股票快照数据
+        row = st.session_state.ind_data[st.session_state.ind_data['名称'] == selected_stock_name].iloc[0]
+        st.metric("实时价", f"¥{row['最新价']}", f"{row['涨跌幅']}%")
     else:
-        st.info("请先同步行业数据")
+        st.info("请先点击上方按钮同步行业成员")
         target_code = None
 
 with col_chart:
     if target_code:
-        with st.spinner("正在扫描金叉信号..."):
-            h_df = ProEngine.safe_fetch(ak.stock_zh_a_hist, symbol=target_code, adjust="qfq")
+        st.markdown(f"#### 📊 {selected_stock_name} ({target_code}) 深度扫描")
+        
+        # 抓取历史数据并分析
+        with st.spinner("正在加载技术面数据..."):
+            h_df = NIQINGEngine.safe_fetch(ak.stock_zh_a_hist, symbol=target_code, adjust="qfq")
+            
             if not h_df.empty:
-                h_df = ProEngine.calc_kdj(h_df)
+                h_df = NIQINGEngine.calc_kdj(h_df)
                 
-                # --- 金叉检测提示逻辑 ---
+                # --- 金叉检测核心逻辑 ---
                 last = h_df.iloc[-1]
                 prev = h_df.iloc[-2]
+                # 金叉定义：昨日K < D，今日K > D
                 is_golden = (prev['K'] < prev['D']) and (last['K'] > last['D'])
                 
                 if is_golden:
-                    # 1. 顶部大横幅提示
-                    st.success(f"🔥 金叉预警：{selected_stock_name} 今日触发 KDJ 金叉！")
-                    # 2. 右下角气泡
-                    st.toast(f"{selected_stock_name} 出现金叉信号！", icon="⭐")
+                    # 界面顶部显眼的大屏横幅提示
+                    st.markdown(f"""
+                        <div style="padding:20px; background-color:rgba(46, 204, 113, 0.2); border:2px solid #2ecc71; border-radius:10px; text-align:center; margin-bottom:20px;">
+                            <h2 style="color:#2ecc71; margin:0;">🔥 金叉预警：{selected_stock_name} 触发！</h2>
+                            <p style="margin:5px 0 0 0; color:#e0e0e0;">该股今日 KDJ 指标达成多头金叉形态</p>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    st.toast(f"{selected_stock_name} 触发金叉！", icon="⭐")
                 else:
-                    st.info("当前指标平稳，暂无金叉信号")
+                    st.markdown("""
+                        <div style="padding:20px; background-color:rgba(149, 165, 166, 0.1); border:1px solid #7f8c8d; border-radius:10px; text-align:center; margin-bottom:20px;">
+                            <h3 style="color:#bdc3c7; margin:0;">指标平稳</h3>
+                            <p style="margin:5px 0 0 0;">目前未检测到 KDJ 金叉交叉点</p>
+                        </div>
+                    """, unsafe_allow_html=True)
 
-                # 绘图显示
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-                fig.add_trace(go.Candlestick(x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], low=h_df['最低'], close=h_df['收盘'], name="K线"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=h_df['日期'], y=h_df['J'], line=dict(color='purple', width=2), name="KDJ-J"), row=2, col=1)
-                fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
+                # 绘制专业三层图表
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+                
+                # K线图
+                fig.add_trace(go.Candlestick(
+                    x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], 
+                    low=h_df['最低'], close=h_df['收盘'], name="K线"
+                ), row=1, col=1)
+                
+                # KDJ 指标曲线
+                fig.add_trace(go.Scatter(x=h_df['日期'], y=h_df['K'], line=dict(color='white', width=1), name="K"), row=2, col=1)
+                fig.add_trace(go.Scatter(x=h_df['日期'], y=h_df['D'], line=dict(color='yellow', width=1), name="D"), row=2, col=1)
+                fig.add_trace(go.Scatter(x=h_df['日期'], y=h_df['J'], line=dict(color='purple', width=1.5), name="J"), row=2, col=1)
+                
+                # 装饰性参考线
+                fig.add_hline(y=20, line_dash="dot", line_color="rgba(255,255,255,0.2)", row=2, col=1)
+                fig.add_hline(y=80, line_dash="dot", line_color="rgba(255,255,255,0.2)", row=2, col=1)
+
+                fig.update_layout(height=650, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(t=30, b=30))
                 st.plotly_chart(fig, use_container_width=True)
-
-# --- 4. 实时监控大厅 ---
-st.title("妮情 · A股抗干扰实时雷达")
-
-tab1, tab2 = st.tabs(["📡 实时监控大厅", "📈 深度指标回测"])
-
-with tab1:
-    c1, c2 = st.columns([1, 4])
-    with c1:
-        is_live = st.toggle("开启实时雷达", value=False)
-        rate = st.select_slider("刷新频率 (秒)", options=[30, 60, 120, 300], value=60)
-    
-    status_bar = st.empty()
-    data_display = st.empty()
-
-    while is_live:
-        now = datetime.now().strftime("%H:%M:%S")
-        status_bar.info(f"正在同步数据... (最后尝试: {now})")
-        
-        # 使用安全抓取
-        raw_df = RobustEngine.safe_fetch(ak.stock_zh_a_spot_em)
-        
-        if not raw_df.empty:
-            raw_df[['最新价', '今开', '最高', '最低', '成交额']] = raw_df[['最新价', '今开', '最高', '最低', '成交额']].apply(pd.to_numeric, errors='coerce')
-            # 这里的过滤逻辑保持你之前的阴线十字星
-            raw_df['entity_pct'] = (raw_df['今开'] - raw_df['最新价']).abs() / (raw_df['最高'] - raw_df['最低'] + 0.001)
-            mask = (raw_df['最新价'] < raw_df['今开']) & (raw_df['entity_pct'] < 0.2) & (raw_df['成交额'] > 50000000)
-            
-            res = raw_df[mask].copy()
-            status_bar.success(f"🟢 监控中 | 更新时间: {now} | 捕获信号: {len(res)}")
-            data_display.dataframe(res.sort_values('成交额', ascending=False), use_container_width=True, height=500)
-            if not res.empty: st.toast("捕获新信号！")
-        else:
-            status_bar.warning(f"🟡 网络波动中，正在等待下一轮重连... (最后尝试: {now})")
-            
-        time.sleep(rate)
-        if not is_live: break
-
-with tab2:
-    code = st.text_input("输入代码深度分析", "600519")
-    if code:
-        # 同样使用安全抓取获取历史数据
-        h_df = RobustEngine.safe_fetch(ak.stock_zh_a_hist, symbol=code, period="daily", adjust="qfq")
-        if not h_df.empty:
-            h_df = RobustEngine.calc_kdj(h_df)
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.6, 0.4])
-            fig.add_trace(go.Candlestick(x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], low=h_df['最低'], close=h_df['收盘'], name="K线"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=h_df['日期'], y=h_df['J'], line=dict(color='purple'), name="KDJ-J"), row=2, col=1)
-            fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("无法连接到数据源，请检查代码或稍后再试。")
+            else:
+                st.error("数据源抓取超时，请稍后再次点击选择股票。")
