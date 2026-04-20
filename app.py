@@ -4,129 +4,97 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import time
+import random
 from datetime import datetime
 
-# ==========================================
-# 1. 终端视觉配置 (NIQING STUDIO 风格)
-# ==========================================
-st.set_page_config(page_title="NIQING | 实时金叉雷达", layout="wide")
+# --- 1. 终端品牌与配置 ---
+st.set_page_config(page_title="NIQING | 抗干扰雷达终端", layout="wide")
+st.markdown("<style>.stApp { background-color: #0b0e14; color: #e0e0e0; }</style>", unsafe_allow_html=True)
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #0b0e14; color: #e0e0e0; }
-    .status-box { padding: 10px; border-radius: 5px; border: 1px solid #d4af37; background: #1a1c23; }
-    [data-testid="stMetricValue"] { color: #d4af37 !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# ==========================================
-# 2. 授权与安全
-# ==========================================
+# --- 2. 授权检查 ---
 if "auth" not in st.session_state:
     st.markdown("<h2 style='text-align: center; color: #d4af37;'>NIQING STUDIO 智能终端</h2>", unsafe_allow_html=True)
-    pwd = st.text_input("授权令牌", type="password")
-    if pwd == "niqing888":
+    if st.text_input("授权令牌", type="password") == "niqing888":
         st.session_state.auth = True
         st.rerun()
     st.stop()
 
-# ==========================================
-# 3. 核心算法引擎
-# ==========================================
-class RadarEngine:
+# --- 3. 稳健型计算引擎 ---
+class RobustEngine:
     @staticmethod
-    def calc_indicators(df):
-        # KDJ计算
+    def safe_fetch(func, *args, **kwargs):
+        """抗干扰抓取核心：错误拦截 + 自动重试"""
+        for i in range(3): # 最多重试3次
+            try:
+                # 增加一个 0.5-1.5秒的随机延迟，降低封锁概率
+                time.sleep(random.uniform(0.5, 1.5)) 
+                data = func(*args, **kwargs)
+                if data is not None and not data.empty:
+                    return data
+            except Exception as e:
+                if i == 2: # 最后一次尝试也失败了
+                    return pd.DataFrame()
+                time.sleep(2)
+        return pd.DataFrame()
+
+    @staticmethod
+    def calc_kdj(df):
         low_list = df['最低'].rolling(9).min()
         high_list = df['最高'].rolling(9).max()
         rsv = (df['收盘'] - low_list) / (high_list - low_list) * 100
         df['K'] = rsv.ewm(com=2, adjust=False).mean()
         df['D'] = df['K'].ewm(com=2, adjust=False).mean()
         df['J'] = 3 * df['K'] - 2 * df['D']
-        # MACD计算
-        df['dif'] = df['收盘'].ewm(span=12, adjust=False).mean() - df['收盘'].ewm(span=26, adjust=False).mean()
-        df['dea'] = df['dif'].ewm(span=9, adjust=False).mean()
         return df
 
-    @classmethod
-    def quick_scan(cls):
-        """实时扫描快照"""
-        try:
-            df = ak.stock_zh_a_spot_em()
-            if df.empty: return pd.DataFrame()
-            df[['最新价', '今开', '最高', '最低', '成交额']] = df[['最新价', '今开', '最高', '最低', '成交额']].apply(pd.to_numeric)
-            
-            # 实时形态过滤：阴线十字星 + 活跃成交
-            df['entity_pct'] = (df['今开'] - df['最新价']).abs() / (df['最高'] - df['最低'])
-            mask = (df['最新价'] < df['今开']) & (df['entity_pct'] < 0.2) & (df['成交额'] > 50000000)
-            
-            res = df[mask].copy()
-            return res[['代码', '名称', '最新价', '涨跌幅', '成交额']]
-        except:
-            return pd.DataFrame()
-
-# ==========================================
-# 4. 界面展示布局
-# ==========================================
-st.title("妮情 · A股全自动实时雷达")
+# --- 4. 实时监控大厅 ---
+st.title("妮情 · A股抗干扰实时雷达")
 
 tab1, tab2 = st.tabs(["📡 实时监控大厅", "📈 深度指标回测"])
 
 with tab1:
-    col_ctrl1, col_ctrl2 = st.columns([1, 4])
-    with col_ctrl1:
-        is_live = st.toggle("开启实时监控", value=False)
-        refresh_rate = st.select_slider("刷新频率 (秒)", options=[10, 30, 60, 300], value=60)
-    
-    # 动态容器
-    status_bar = st.empty()
-    data_table = st.empty()
-
-    if is_live:
-        while is_live:
-            current_time = datetime.now().strftime("%H:%M:%S")
-            status_bar.markdown(f"🟢 **实时模式已开启** | 最后更新：{current_time} | 频率：{refresh_rate}s")
-            
-            results = RadarEngine.quick_scan()
-            if not results.empty:
-                data_table.dataframe(results.sort_values('成交额', ascending=False), use_container_width=True, height=500)
-                # 针对新出现的信号弹窗 (这里取第一名作为示例)
-                st.toast(f"发现 {len(results)} 个潜在信号", icon="🔍")
-            else:
-                data_table.info("正在搜索信号中...")
-            
-            time.sleep(refresh_rate)
-            if not is_live: break
-    else:
-        status_bar.markdown("⚪ **监控已停止** | 点击上方开关启动自动刷新")
-        if st.button("单次手动扫描"):
-            results = RadarEngine.quick_scan()
-            data_table.dataframe(results, use_container_width=True)
-
-with tab2:
     c1, c2 = st.columns([1, 4])
     with c1:
-        code = st.text_input("输入自选代码", "600519")
-        days = st.slider("数据范围", 60, 240, 120)
+        is_live = st.toggle("开启实时雷达", value=False)
+        rate = st.select_slider("刷新频率 (秒)", options=[30, 60, 120, 300], value=60)
     
-    if code:
-        start_date = (pd.Timestamp.now() - pd.Timedelta(days=days+30)).strftime('%Y%m%d')
-        df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date, adjust="qfq")
+    status_bar = st.empty()
+    data_display = st.empty()
+
+    while is_live:
+        now = datetime.now().strftime("%H:%M:%S")
+        status_bar.info(f"正在同步数据... (最后尝试: {now})")
         
-        if not df_hist.empty:
-            df_hist = RadarEngine.calc_indicators(df_hist)
-            last = df_hist.iloc[-1]
-            prev = df_hist.iloc[-2]
+        # 使用安全抓取
+        raw_df = RobustEngine.safe_fetch(ak.stock_zh_a_spot_em)
+        
+        if not raw_df.empty:
+            raw_df[['最新价', '今开', '最高', '最低', '成交额']] = raw_df[['最新价', '今开', '最高', '最低', '成交额']].apply(pd.to_numeric, errors='coerce')
+            # 这里的过滤逻辑保持你之前的阴线十字星
+            raw_df['entity_pct'] = (raw_df['今开'] - raw_df['最新价']).abs() / (raw_df['最高'] - raw_df['最低'] + 0.001)
+            mask = (raw_df['最新价'] < raw_df['今开']) & (raw_df['entity_pct'] < 0.2) & (raw_df['成交额'] > 50000000)
+            
+            res = raw_df[mask].copy()
+            status_bar.success(f"🟢 监控中 | 更新时间: {now} | 捕获信号: {len(res)}")
+            data_display.dataframe(res.sort_values('成交额', ascending=False), use_container_width=True, height=500)
+            if not res.empty: st.toast("捕获新信号！")
+        else:
+            status_bar.warning(f"🟡 网络波动中，正在等待下一轮重连... (最后尝试: {now})")
+            
+        time.sleep(rate)
+        if not is_live: break
 
-            # 金叉判定弹窗
-            if prev['K'] < prev['D'] and last['K'] > last['D']:
-                st.success(f"⚡ 实时预警：{code} 今日达成 KDJ 金叉！")
-                st.toast("KDJ 金叉触发！", icon="🔥")
-
-            # 绘图
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.6, 0.4], vertical_spacing=0.05)
-            fig.add_trace(go.Candlestick(x=df_hist['日期'], open=df_hist['开盘'], high=df_hist['最高'], low=df_hist['最低'], close=df_hist['收盘'], name="K线"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_hist['日期'], y=df_hist['J'], line=dict(color='purple', width=2), name="KDJ-J"), row=2, col=1)
-            fig.add_hline(y=20, line_dash="dot", row=2, col=1)
-            fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False)
+with tab2:
+    code = st.text_input("输入代码深度分析", "600519")
+    if code:
+        # 同样使用安全抓取获取历史数据
+        h_df = RobustEngine.safe_fetch(ak.stock_zh_a_hist, symbol=code, period="daily", adjust="qfq")
+        if not h_df.empty:
+            h_df = RobustEngine.calc_kdj(h_df)
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.6, 0.4])
+            fig.add_trace(go.Candlestick(x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], low=h_df['最低'], close=h_df['收盘'], name="K线"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=h_df['日期'], y=h_df['J'], line=dict(color='purple'), name="KDJ-J"), row=2, col=1)
+            fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error("无法连接到数据源，请检查代码或稍后再试。")
