@@ -96,4 +96,25 @@ all_df = pd.concat([st.session_state.g_list, st.session_state.c_list]).drop_dupl
 
 if not all_df.empty:
     selected_name = st.selectbox("🔍 选择个股查看量价配合", all_df['名称'].tolist())
-    target_code = all_df[all_df['名称'] == selected_name
+    target_code = all_df[all_df['名称'] == selected_name]['代码'].values[0]
+    
+    with st.spinner("绘制回测图表..."):
+        h_df = ak.stock_zh_a_hist(symbol=target_code, adjust="qfq").tail(60)
+        
+        # 严格使用中文列名引用
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
+        
+        # K线主图
+        fig.add_trace(go.Candlestick(
+            x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], 
+            low=h_df['最低'], close=h_df['收盘'], name="K线"
+        ), row=1, col=1)
+        
+        # 成交量副图
+        v_colors = ['#2ecc71' if c > o else '#e74c3c' for c, o in zip(h_df['收盘'], h_df['开盘'])]
+        fig.add_trace(go.Bar(x=h_df['日期'], y=h_df['成交量'], marker_color=v_colors, name="成交量"), row=2, col=1)
+        
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("执行扫描后获取数据")
