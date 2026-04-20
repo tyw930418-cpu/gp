@@ -2,4 +2,3 @@ streamlit
 akshare
 pandas
 plotly
-pandas_ta
