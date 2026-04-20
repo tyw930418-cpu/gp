@@ -7,14 +7,14 @@ import time
 import random
 
 # --- 1. 终端配置 ---
-st.set_page_config(page_title="NIQING | 智能搜索雷达", layout="wide")
+st.set_page_config(page_title="NIQING | 全自动扫描终端", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #0b0e14; color: #e0e0e0; }
-    .stButton>button { border: 1px solid #d4af37; color: #d4af37; background: transparent; width: 100%; }
-    .stButton>button:hover { background-color: #d4af37; color: black; }
-    .search-box { border: 1px solid #d4af37 !important; }
+    .stButton>button { border: 1px solid #d4af37; color: #d4af37; background: transparent; width: 100%; height: 3em; font-size: 20px; }
+    .stButton>button:hover { background-color: #d4af37; color: black; border: 1px solid #d4af37; }
+    .gold-text { color: #d4af37; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -26,101 +26,91 @@ if "auth" not in st.session_state:
         st.rerun()
     st.stop()
 
-# --- 3. 核心计算类 ---
-class NIQINGEngine:
+# --- 3. 高性能扫描引擎 ---
+class NIQINGScanner:
     @staticmethod
-    def safe_fetch(func, **kwargs):
-        for _ in range(3):
-            try:
-                time.sleep(random.uniform(0.2, 0.5))
-                return func(**kwargs)
-            except:
-                time.sleep(1)
-        return pd.DataFrame()
-
-    @staticmethod
-    def calc_kdj(df):
-        if df.empty: return df
-        low_9 = df['最低'].rolling(9).min()
-        high_9 = df['最高'].rolling(9).max()
-        rsv = (df['收盘'] - low_9) / (high_9 - low_9 + 0.001) * 100
-        df['K'] = rsv.ewm(com=2, adjust=False).mean()
-        df['D'] = df['K'].ewm(com=2, adjust=False).mean()
-        df['J'] = 3 * df['K'] - 2 * df['D']
-        return df
+    def get_kdj_signal(code):
+        """单只股票金叉判定逻辑"""
+        try:
+            # 抓取最近30天数据即可，提高速度
+            df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq").tail(30)
+            if len(df) < 10: return False
+            
+            low_9 = df['最低'].rolling(9).min()
+            high_9 = df['最高'].rolling(9).max()
+            rsv = (df['收盘'] - low_9) / (high_9 - low_9 + 0.001) * 100
+            df['K'] = rsv.ewm(com=2, adjust=False).mean()
+            df['D'] = df['K'].ewm(com=2, adjust=False).mean()
+            
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
+            # 判定：昨日K<D 且 今日K>D
+            return (prev['K'] < prev['D']) and (last['K'] > last['D'])
+        except:
+            return False
 
 # --- 4. UI 交互布局 ---
-st.title("妮情 · 全市场搜索与金叉预警")
+st.title("妮情 · 今日金叉全自动雷达")
 
-# 侧边栏：搜索逻辑
-st.sidebar.markdown("### 🔍 选股雷达")
-mode = st.sidebar.radio("选择模式", ["关键词搜索", "行业分类"])
+# 侧边栏参数控制
+st.sidebar.header("⚙️ 扫描过滤参数")
+min_vol = st.sidebar.number_input("最小成交额 (万元)", value=10000, step=1000)
+min_pct = st.sidebar.slider("今日最低涨幅 (%)", -2.0, 5.0, 0.0)
+max_scan = st.sidebar.slider("最大扫描数量", 50, 300, 100, help="为了防止被封IP，建议先扫活跃的前100只")
 
-if mode == "关键词搜索":
-    search_query = st.sidebar.text_input("输入关键词 (如：商业航天)", "商业航天")
-    if st.sidebar.button("🔍 全市场匹配"):
-        with st.spinner(f"正在全市场匹配 '{search_query}' 相关股票..."):
-            # 获取全 A 股快照
-            all_stocks = NIQINGEngine.safe_fetch(ak.stock_zh_a_spot_em)
-            if not all_stocks.empty:
-                # 模糊匹配名称
-                res = all_stocks[all_stocks['名称'].str.contains(search_query, na=False)]
-                if res.empty:
-                    st.sidebar.warning("未匹配到名称包含该词的股票")
-                else:
-                    st.session_state.ind_data = res[['代码', '名称', '最新价', '涨跌幅']]
-            else:
-                st.sidebar.error("数据源连接失败")
+if st.button("🚀 启动全市场金叉自动扫描"):
+    with st.spinner("正在同步全市场实时行情..."):
+        # 1. 获取全 A 股快照
+        all_stocks = ak.stock_zh_a_spot_em()
+        if not all_stocks.empty:
+            # 2. 初步筛选：按成交额和涨幅过滤掉“僵尸股”
+            all_stocks[['最新价', '涨跌幅', '成交额']] = all_stocks[['最新价', '涨跌幅', '成交额']].apply(pd.to_numeric, errors='coerce')
+            filtered = all_stocks[
+                (all_stocks['成交额'] >= min_vol * 10000) & 
+                (all_stocks['涨跌幅'] >= min_pct)
+            ].sort_values('成交额', ascending=False).head(max_scan)
+            
+            st.info(f"符合初步筛选条件共 {len(filtered)} 只，开始深度扫描 KDJ 指标...")
+            
+            # 3. 循环判定金叉
+            golden_list = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for i, (idx, row) in enumerate(filtered.iterrows()):
+                status_text.text(f"正在分析: {row['名称']} ({i+1}/{len(filtered)})")
+                if NIQINGScanner.get_kdj_signal(row['代码']):
+                    golden_list.append({
+                        "代码": row['代码'],
+                        "名称": row['名称'],
+                        "最新价": row['最新价'],
+                        "涨跌幅%": row['涨跌幅'],
+                        "成交额(亿)": round(row['成交额']/1e8, 2)
+                    })
+                progress_bar.progress((i + 1) / len(filtered))
+                time.sleep(0.1) # 微小延迟保护IP
+            
+            st.session_state.golden_results = pd.DataFrame(golden_list)
+            status_text.success(f"扫描完成！今日共捕捉到 {len(golden_list)} 只金叉股。")
+        else:
+            st.error("无法连接到行情中心")
 
-else:
-    industry_list = ["航天航空", "半导体", "通信设备", "汽车整车", "酿酒行业", "生物制品"]
-    selected_industry = st.sidebar.selectbox("选择目标行业", industry_list)
-    if st.sidebar.button("🔄 同步行业数据"):
-        with st.spinner("获取中..."):
-            df_ind = NIQINGEngine.safe_fetch(ak.stock_board_industry_cons_em, symbol=selected_industry)
-            if not df_ind.empty:
-                st.session_state.ind_data = df_ind[['代码', '名称', '最新价', '涨跌幅']]
-            else:
-                st.sidebar.error("同步失败")
-
-# 主界面显示
-col_list, col_chart = st.columns([1, 2.5])
-
-with col_list:
-    if "ind_data" in st.session_state:
-        st.markdown(f"#### 📋 匹配结果 ({len(st.session_state.ind_data)})")
-        stock_options = st.session_state.ind_data['名称'].tolist()
-        selected_stock_name = st.selectbox("选择目标个股", stock_options)
-        target_code = st.session_state.ind_data[st.session_state.ind_data['名称'] == selected_stock_name]['代码'].values[0]
+# --- 5. 结果展示 ---
+if "golden_results" in st.session_state and not st.session_state.golden_results.empty:
+    st.markdown("### 🎯 今日金叉信号池")
+    # 使用 dataframe 展示结果
+    selected_stock = st.selectbox("点击下方列表中的股票查看详情图表", st.session_state.golden_results['名称'].tolist())
+    
+    st.table(st.session_state.golden_results)
+    
+    # 联动展示选中的图表
+    if selected_stock:
+        target_code = st.session_state.golden_results[st.session_state.golden_results['名称'] == selected_stock]['代码'].values[0]
+        h_df = ak.stock_zh_a_hist(symbol=target_code, adjust="qfq").tail(60)
         
-        row = st.session_state.ind_data[st.session_state.ind_data['名称'] == selected_stock_name].iloc[0]
-        st.metric("最新价", f"¥{row['最新价']}", f"{row['涨跌幅']}%")
-    else:
-        st.info("请先通过侧边栏执行搜索或同步")
-        target_code = None
-
-with col_chart:
-    if target_code:
-        st.markdown(f"#### 📊 {selected_stock_name} ({target_code}) 深度监测")
-        with st.spinner("分析 KDJ 走势..."):
-            h_df = NIQINGEngine.safe_fetch(ak.stock_zh_a_hist, symbol=target_code, adjust="qfq")
-            if not h_df.empty:
-                h_df = NIQINGEngine.calc_kdj(h_df)
-                last = h_df.iloc[-1]
-                prev = h_df.iloc[-2]
-                is_golden = (prev['K'] < prev['D']) and (last['K'] > last['D'])
-                
-                if is_golden:
-                    st.markdown(f"""
-                        <div style="padding:15px; background:rgba(46, 204, 113, 0.2); border:1px solid #2ecc71; border-radius:10px; text-align:center; margin-bottom:15px;">
-                            <h2 style="color:#2ecc71; margin:0;">🔥 金叉信号已达成！</h2>
-                        </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown("<div style='text-align:center; color:#888;'>趋势平稳中</div>", unsafe_allow_html=True)
-
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-                fig.add_trace(go.Candlestick(x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], low=h_df['最低'], close=h_df['收盘'], name="K线"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=h_df['日期'], y=h_df['J'], line=dict(color='purple', width=2), name="KDJ-J"), row=2, col=1)
-                fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
+        fig.add_trace(go.Candlestick(x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], low=h_df['最低'], close=h_df['收盘'], name="K线"), row=1, col=1)
+        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+elif "golden_results" in st.session_state:
+    st.warning("完成扫描，但未发现符合条件的金叉股票。")
