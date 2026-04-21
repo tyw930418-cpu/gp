@@ -1,135 +1,103 @@
 import streamlit as st
 import akshare as ak
 import pandas as pd
-import plotly.graph_objects as go
 import time
 
-# --- 1. 界面与风格 ---
-st.set_page_config(page_title="NIQING | 全能抗压雷达", layout="wide")
+# --- 1. 页面配置 ---
+st.set_page_config(page_title="NIQING | 双窗口并行雷达", layout="wide")
 
-# --- 2. 核心数据抓取（带备用源逻辑） ---
-def fetch_data_with_retry():
-    """一级尝试：东方财富；二级尝试：新浪"""
+# --- 2. 高可用抓取逻辑 (带缓存保护) ---
+@st.cache_data(ttl=60)
+def get_market_data():
+    """尝试从东财抓取，挂了就切新浪"""
     try:
-        # 尝试东财源
         df = ak.stock_zh_a_spot_em()
-        if not df.empty: return df, "东方财富"
+        return df, "东财源"
     except:
         try:
-            # 东财挂了，自动切换新浪源
             df = ak.stock_zh_a_spot_sina()
-            if not df.empty: return df, "新浪财经"
+            return df, "新浪源"
         except:
             return None, None
 
 def get_hist_safe(symbol):
-    """抓取历史K线，增加频率保护"""
     try:
-        time.sleep(0.3) # 冷却防止连环封
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq").tail(40)
-        return df
+        time.sleep(0.3) # 强制冷却，防止双窗口同时请求导致封号
+        return ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq").tail(25)
     except:
         return None
 
-# --- 3. 左侧控制中心 (Sidebar) ---
+# --- 3. 左侧控制中心 (控制两个窗口的开关) ---
 with st.sidebar:
-    st.title("妮情 · 策略控制台")
+    st.title("妮情 · 并行控制台")
     st.divider()
     
-    # 模块 1
-    st.subheader("🔍 个股搜索窗口")
-    search_code = st.text_input("代码搜索", placeholder="输入后回车", key="s_1")
+    st.subheader("📡 任务选择")
+    show_star = st.checkbox("开启：阴线十字星监控", value=True)
+    show_gold = st.checkbox("开启：金叉趋势预警", value=True)
     
     st.divider()
+    vol_threshold = st.number_input("全局准入额 (亿)", value=5.0)
     
-    # 模块 2
-    st.subheader("🟢 阴线十字星监控")
-    vol_star = st.number_input("准入额 (亿)", value=5.0)
-    btn_star = st.button("全场同步信号", key="b_star")
-    
-    st.divider()
-    
-    # 模块 3
-    st.subheader("⚡ 金叉行情预警")
-    vol_gold = st.number_input("金叉门槛 (亿)", value=8.0)
-    btn_gold = st.button("全场深度预警", key="b_gold")
-    
-    st.divider()
-    if st.button("♻️ 强制重置连接"):
+    if st.button("🚀 执行双窗同步扫描"):
         st.cache_data.clear()
         st.rerun()
 
-# --- 4. 右侧结果大屏 ---
-st.header("NIQING STUDIO · 实时监测中心")
+# --- 4. 右侧结果展示区 (双栏并行布局) ---
+st.header("NIQING STUDIO · 双窗口同步监测")
 
-# A. 搜索逻辑
-if search_code:
-    with st.spinner("🚀 正在穿透数据源..."):
-        h_df = get_hist_safe(search_code)
-        if h_df is not None:
-            fig = go.Figure(data=[go.Candlestick(x=h_df['日期'], open=h_df['开盘'], 
-                            high=h_df['最高'], low=h_df['最低'], close=h_df['收盘'])])
-            fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=400)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("⚠️ 连线中断：当前所有数据源均无法响应，请点击左侧重置。")
+# 创建左右两列
+col_left, col_right = st.columns(2)
 
-# B. 阴线十字星扫描 (带动态查找动画)
-if btn_star:
-    with st.status("🔍 正在扫描全市场阴线信号...", expanded=True) as status:
-        st.write("正在探测可用数据服务器...")
-        spot, source = fetch_data_with_retry()
-        if spot is not None:
-            st.write(f"成功连接至【{source}】数据源，开始形态匹配...")
-            spot['成交额'] = pd.to_numeric(spot['成交额'], errors='coerce')
-            pool = spot[spot['成交额'] >= vol_star * 100000000].copy()
-            
-            p_bar = st.progress(0)
-            res = []
-            for i, (idx, row) in enumerate(pool.iterrows()):
-                p_bar.progress((i + 1) / len(pool))
-                o, c, h, l = row['今开'], row['最新价'], row['最高'], row['最低']
-                if c < o and (h-l) > 0:
-                    if (abs(o-c)/(h-l)) <= 0.15:
-                        res.append({"代码":row['代码'], "名称":row['名称'], "最新价":c, "跌幅%":row['涨跌幅'], "量额(亿)":round(row['成交额']/1e8, 2)})
-            
-            if res:
-                st.dataframe(pd.DataFrame(res), use_container_width=True)
-                status.update(label=f"✅ {source} 信号同步完成", state="complete")
+# --- 左窗口：阴线十字星 ---
+with col_left:
+    if show_star:
+        st.subheader("🟢 阴线十字星监控")
+        with st.status("正在扫描形态...", expanded=False):
+            df, src = get_market_data()
+            if df is not None:
+                df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
+                pool = df[df['成交额'] >= vol_threshold * 100000000].copy()
+                res = []
+                for _, row in pool.iterrows():
+                    o, c, h, l = row['今开'], row['最新价'], row['最高'], row['最低']
+                    if c < o and (h-l) > 0: # 阴线判断
+                        if (abs(o-c)/(h-l)) <= 0.12:
+                            res.append({"代码":row['代码'], "名称":row['名称'], "涨跌":row['涨跌幅']})
+                if res:
+                    st.dataframe(pd.DataFrame(res), use_container_width=True)
+                else:
+                    st.info("暂无阴线信号")
             else:
-                st.warning("信号池为空")
-        else:
-            status.update(label="❌ 报警：全网源繁忙，请稍后再试", state="error")
+                st.error("数据链路断开")
+    else:
+        st.info("左窗口已关闭")
 
-# C. 金叉预警扫描
-if btn_gold:
-    with st.status("⚡ 启动深度趋势识别...", expanded=True) as status:
-        spot, source = fetch_data_with_retry()
-        if spot is not None:
-            spot['成交额'] = pd.to_numeric(spot['成交额'], errors='coerce')
-            pool = spot[spot['成交额'] >= vol_gold * 100000000].sort_values('成交额', ascending=False).head(25)
-            
-            g_bar = st.progress(0)
-            gold_res = []
-            for i, (idx, row) in enumerate(pool.iterrows()):
-                g_bar.progress((i + 1) / len(pool))
-                st.write(f"正在穿透: {row['名称']}")
-                df_h = get_hist_safe(row['代码'])
-                if df_h is not None and len(df_h) >= 15:
-                    # KDJ 计算
-                    low_9 = df_h['最低'].rolling(9).min()
-                    high_9 = df_h['最高'].rolling(9).max()
-                    rsv = (df_h['收盘'] - low_9) / (high_9 - low_9) * 100
-                    k = rsv.ewm(com=2).mean()
-                    d = k.ewm(com=2).mean()
-                    j = 3 * k - 2 * d
-                    if j.iloc[-1] > d.iloc[-1] and j.iloc[-2] <= d.iloc[-2]:
-                        gold_res.append({"代码":row['代码'], "名称":row['名称'], "J值":round(j.iloc[-1],2), "成交额(亿)":round(row['成交额']/1e8, 2)})
-            
-            if gold_res:
-                st.dataframe(pd.DataFrame(gold_res), use_container_width=True)
-                status.update(label="✅ 趋势识别完成", state="complete")
-            else:
-                st.info("当前暂无强势金叉信号")
-        else:
-            status.update(label="❌ 数据链路崩溃", state="error")
+# --- 右窗口：金叉预警 ---
+with col_right:
+    if show_gold:
+        st.subheader("⚡ 金叉趋势预警")
+        with st.status("正在计算均线...", expanded=False):
+            df, src = get_market_data()
+            if df is not None:
+                df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
+                # 为保稳定，右窗口只扫成交额前 20 的票
+                pool = df[df['成交额'] >= vol_threshold * 100000000].sort_values('成交额', ascending=False).head(20)
+                gold_res = []
+                for _, row in pool.iterrows():
+                    h_df = get_hist_safe(row['代码'])
+                    if h_df is not None and len(h_df) >= 15:
+                        # KDJ 逻辑
+                        l9, h9 = h_df['最低'].rolling(9).min(), h_df['最高'].rolling(9).max()
+                        rsv = (h_df['收盘'] - l9) / (h9 - l9) * 100
+                        k = rsv.ewm(com=2).mean()
+                        d = k.ewm(com=2).mean()
+                        j = 3*k - 2*d
+                        if j.iloc[-1] > d.iloc[-1] and j.iloc[-2] <= d.iloc[-2]:
+                            gold_res.append({"代码":row['代码'], "名称":row['名称'], "J值":round(j.iloc[-1],2)})
+                if gold_res:
+                    st.dataframe(pd.DataFrame(gold_res), use_container_width=True)
+                else:
+                    st.info("活跃池暂无金叉")
+    else:
+        st.info("右窗口已关闭")
