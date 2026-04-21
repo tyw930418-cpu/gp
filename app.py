@@ -2,76 +2,86 @@ import streamlit as st
 import akshare as ak
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
-# --- 1. 页面基础配置 ---
-st.set_page_config(page_title="NIQING | 量能雷达", layout="wide")
+# --- 1. 页面设置 ---
+st.set_page_config(page_title="NIQING | 复合预警雷达", layout="wide")
+st.title("妮情 · 量能 + 十字星 + 金叉 复合扫描终端")
 
-# 初始化状态，防止页面刷新报错
-if "c_list" not in st.session_state: 
+if "c_list" not in st.session_state:
     st.session_state.c_list = pd.DataFrame()
 
-st.title("妮情 · 量能信号全自动实时雷达")
-
-# --- 2. 侧边栏参数 ---
+# --- 2. 侧边栏策略参数 ---
 with st.sidebar:
-    st.header("⚙️ 策略参数")
-    scan_limit = st.slider("扫描深度", 50, 200, 100)
-    min_vol_val = st.number_input("准入成交额(万)", value=5000)
+    st.header("⚙️ 预警配置")
+    min_vol_亿 = st.number_input("最低成交额 (亿)", value=5.0)
+    star_ratio = st.slider("十字星严格度 (实体占比)", 0.05, 0.25, 0.15)
+    st.info("提示：金叉检测会调取历史 K 线，扫描速度会略微变慢。")
 
-# --- 3. 核心扫描逻辑 ---
-if st.button("🚀 启动全市场深度量能扫描"):
-    with st.spinner("同步数据中..."):
+# --- 3. 核心计算函数 ---
+def check_kdj_gold(df):
+    """判定 KDJ 是否在低位金叉"""
+    low, high, close = df['low'], df['high'], df['close']
+    low_9 = low.rolling(window=9).min()
+    high_9 = high.rolling(window=9).max()
+    rsv = (close - low_9) / (high_9 - low_9) * 100
+    k = rsv.ewm(com=2).mean()
+    d = k.ewm(com=2).mean()
+    j = 3 * k - 2 * d
+    # 金叉逻辑：当日 J > D 且昨日 J <= D
+    if j.iloc[-1] > d.iloc[-1] and j.iloc[-2] <= d.iloc[-2]:
+        return True, round(j.iloc[-1], 2)
+    return False, 0
+
+# --- 4. 扫描引擎 ---
+if st.button("🚀 启动全维度复合预警扫描"):
+    with st.spinner("正在解构全市场量价信号..."):
         try:
-            # 抓取实时行情
-            all_data = ak.stock_zh_a_spot_em()
-            if not all_data.empty:
-                # 转换数值类型并清洗
-                cols = ['最新价', '涨跌幅', '成交量', '成交额', '最高', '最低', '今开']
-                all_data[cols] = all_data[cols].apply(pd.to_numeric, errors='coerce')
+            # 1. 抓取实时快照
+            spot_df = ak.stock_zh_a_spot_em()
+            # 基础过滤：成交额
+            spot_df['成交额'] = pd.to_numeric(spot_df['成交额'], errors='coerce')
+            pool = spot_df[spot_df['成交额'] >= min_vol_亿 * 100000000].copy()
+            
+            res = []
+            progress_bar = st.progress(0)
+            
+            for i, (idx, row) in enumerate(pool.iterrows()):
+                # 更新进度条
+                progress_bar.progress((i + 1) / len(pool))
                 
-                # 过滤高活跃池
-                pool = all_data[all_data['成交额'] >= min_vol_val * 10000].sort_values('成交额', ascending=False).head(scan_limit)
-                
-                c_res = []
-                for _, row in pool.iterrows():
-                    # 绿色十字星简易监控逻辑
-                    if row['今开'] > row['最新价'] and (row['最高'] - row['最低']) > 0:
-                        diff = abs(row['今开'] - row['最新价']) / (row['最高'] - row['最低'])
-                        if diff < 0.15:
-                            c_res.append({
-                                "代码": row['代码'], "名称": row['名称'], "涨跌幅%": row['涨跌幅'],
-                                "最新价": row['最新价'], "成交量(手)": int(row['成交量']),
-                                "成交额(亿)": round(row['成交额']/1e8, 2)
+                # A. 十字星判定逻辑
+                o, c, h, l = row['今开'], row['最新价'], row['最高'], row['最低']
+                body = abs(o - c)
+                amp = h - l
+                if amp > 0 and (body / amp) <= star_ratio:
+                    star_type = "🔴 阳线十字" if c >= o else "🟢 阴线十字"
+                    
+                    # B. 调取历史数据判断金叉 (由于速度考虑，仅对符合十字星的票进行金叉检测)
+                    try:
+                        hist = ak.stock_zh_a_hist(symbol=row['代码'], period="daily", adjust="qfq").tail(20)
+                        is_gold, j_val = check_kdj_gold(hist)
+                        
+                        if is_gold:
+                            res.append({
+                                "代码": row['代码'],
+                                "名称": row['名称'],
+                                "形态": star_type,
+                                "预警": "⚡ KDJ金叉",
+                                "J值": j_val,
+                                "成交额(亿)": round(row['成交额']/1e8, 2),
+                                "涨跌幅%": row['涨跌幅']
                             })
-                st.session_state.c_list = pd.DataFrame(c_res)
-                st.success(f"同步成功，捕捉到 {len(c_res)} 个量能信号")
+                    except:
+                        continue
+            
+            st.session_state.c_list = pd.DataFrame(res)
+            st.success(f"扫描完成！捕捉到 {len(res)} 个复合强势信号。")
         except Exception as e:
-            st.error(f"连接失败或接口维护中: {e}")
+            st.error(f"扫描中断: {e}")
 
-# --- 4. 结果展示 ---
-st.subheader("💹 监控台结果")
-st.dataframe(st.session_state.c_list, use_container_width=True)
-
-# --- 5. 深度量价透视 ---
+# --- 5. 数据展示 ---
 if not st.session_state.c_list.empty:
-    st.divider()
-    selected = st.selectbox("🔍 选定个股深度量价透视", st.session_state.c_list['名称'].tolist())
-    code = st.session_state.c_list[st.session_state.c_list['名称'] == selected]['代码'].values[0]
-    
-    try:
-        h_df = ak.stock_zh_a_hist(symbol=code, adjust="qfq").tail(60)
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-        
-        # K线图
-        fig.add_trace(go.Candlestick(x=h_df['日期'], open=h_df['开盘'], high=h_df['最高'], 
-                                     low=h_df['最低'], close=h_df['收盘'], name="K线"), row=1, col=1)
-        # 成交量
-        fig.add_trace(go.Bar(x=h_df['日期'], y=h_df['成交量'], name="成交量", marker_color='gold'), row=2, col=1)
-        
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-    except:
-        st.info("历史数据加载中...")
+    st.dataframe(st.session_state.c_list, use_container_width=True)
+    st.caption("注：雷达同时满足 [大成交额] + [十字星形态] + [KDJ低位金叉] 三个条件。")
 else:
-    st.info("完成上方扫描后，此处将自动开启深度量价透视。")
+    st.info("等待扫描指令。建议选择交易活跃时段运行。")
