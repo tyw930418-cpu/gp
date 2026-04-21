@@ -1,103 +1,130 @@
 import streamlit as st
 import akshare as ak
 import pandas as pd
+import plotly.graph_objects as go
 import time
 
-# --- 1. 页面配置 ---
-st.set_page_config(page_title="NIQING | 双窗口并行雷达", layout="wide")
+# --- 1. 界面与风格 ---
+st.set_page_config(page_title="NIQING | 多源抗压终端", layout="wide")
+st.markdown("""
+    <style>
+    [data-testid="stSidebar"] { background-color: #0e1117; border-right: 1px solid #d4af37; }
+    .stProgress > div > div > div > div { background-image: linear-gradient(to right, #d4af37, #f7e08b); }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- 2. 高可用抓取逻辑 (带缓存保护) ---
-@st.cache_data(ttl=60)
-def get_market_data():
-    """尝试从东财抓取，挂了就切新浪"""
+# --- 2. 多源数据抓取逻辑 ---
+def get_market_snapshot():
+    """多源切换：东财 -> 新浪 -> 腾讯"""
+    sources = [
+        ("东方财富", ak.stock_zh_a_spot_em),
+        ("新浪财经", ak.stock_zh_a_spot_sina)
+    ]
+    for name, func in sources:
+        try:
+            df = func()
+            if df is not None and not df.empty:
+                return df, name
+        except:
+            continue
+    return None, None
+
+def get_hist_with_retry(symbol):
+    """抓取历史K线，失败后尝试备用接口"""
+    time.sleep(0.2) # 基础冷却
     try:
-        df = ak.stock_zh_a_spot_em()
-        return df, "东财源"
+        # 首选东财历史源
+        return ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq").tail(45)
     except:
         try:
-            df = ak.stock_zh_a_spot_sina()
-            return df, "新浪源"
+            # 备选新浪源
+            return ak.stock_zh_a_daily_qfq(symbol="sh" + symbol if symbol.startswith('6') else "sz" + symbol).tail(45)
         except:
-            return None, None
+            return None
 
-def get_hist_safe(symbol):
-    try:
-        time.sleep(0.3) # 强制冷却，防止双窗口同时请求导致封号
-        return ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq").tail(25)
-    except:
-        return None
-
-# --- 3. 左侧控制中心 (控制两个窗口的开关) ---
+# --- 3. 左侧控制中心 ---
 with st.sidebar:
-    st.title("妮情 · 并行控制台")
+    st.title("妮情 · 策略中心")
     st.divider()
     
-    st.subheader("📡 任务选择")
-    show_star = st.checkbox("开启：阴线十字星监控", value=True)
-    show_gold = st.checkbox("开启：金叉趋势预警", value=True)
+    # 窗口 1: 个股搜索
+    st.subheader("🔍 个股搜索")
+    target_code = st.text_input("代码 (如 600519)", key="input_target")
     
     st.divider()
-    vol_threshold = st.number_input("全局准入额 (亿)", value=5.0)
     
-    if st.button("🚀 执行双窗同步扫描"):
+    # 窗口 2 & 3: 全局扫描控制
+    st.subheader("📡 全局信号监控")
+    vol_limit = st.number_input("准入成交额 (亿)", value=5.0)
+    btn_scan = st.button("🚀 启动全场扫描", key="main_scan")
+    
+    st.divider()
+    if st.button("♻️ 重置所有连接"):
         st.cache_data.clear()
         st.rerun()
 
-# --- 4. 右侧结果展示区 (双栏并行布局) ---
-st.header("NIQING STUDIO · 双窗口同步监测")
+# --- 4. 右侧结果大屏 ---
+st.header("NIQING STUDIO · 多源监测大屏")
 
-# 创建左右两列
-col_left, col_right = st.columns(2)
+# --- 顶部：个股详情窗口 ---
+if target_code:
+    with st.status(f"正在建立链路透视: {target_code}...") as status:
+        h_df = get_hist_with_retry(target_code)
+        if h_df is not None:
+            fig = go.Figure(data=[go.Candlestick(x=h_df.index if '日期' not in h_df.columns else h_df['日期'],
+                            open=h_df['开盘'], high=h_df['最高'], low=h_df['最低'], close=h_df['收盘'])])
+            fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=350)
+            st.plotly_chart(fig, use_container_width=True)
+            status.update(label="✅ 个股数据同步成功", state="complete")
+        else:
+            st.error("⚠️ 警告：当前所有行情源均繁忙，请稍后再试。")
 
-# --- 左窗口：阴线十字星 ---
-with col_left:
-    if show_star:
-        st.subheader("🟢 阴线十字星监控")
-        with st.status("正在扫描形态...", expanded=False):
-            df, src = get_market_data()
-            if df is not None:
-                df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
-                pool = df[df['成交额'] >= vol_threshold * 100000000].copy()
-                res = []
-                for _, row in pool.iterrows():
-                    o, c, h, l = row['今开'], row['最新价'], row['最高'], row['最低']
-                    if c < o and (h-l) > 0: # 阴线判断
+# --- 底部：双窗并行扫描 ---
+if btn_scan:
+    col_left, col_right = st.columns(2)
+    
+    with st.spinner("正在并发穿透多个数据源..."):
+        spot_df, active_source = get_market_snapshot()
+        
+    if spot_df is not None:
+        st.caption(f"当前在线数据源：{active_source}")
+        # 统一清洗数据列名（东财和新浪列名不同，需兼容）
+        if '成交额' not in spot_df.columns and 'amount' in spot_df.columns:
+            spot_df = spot_df.rename(columns={'amount': '成交额', 'code': '代码', 'name': '名称', 'open': '今开', 'trade': '最新价', 'high': '最高', 'low': '最低'})
+        
+        spot_df['成交额'] = pd.to_numeric(spot_df['成交额'], errors='coerce')
+        pool = spot_df[spot_df['成交额'] >= vol_limit * 100000000].copy()
+        
+        # --- 左窗：阴线十字星 ---
+        with col_left:
+            st.subheader("🟢 阴线十字星监控")
+            res_star = []
+            for _, row in pool.iterrows():
+                try:
+                    o, c, h, l = float(row['今开']), float(row['最新价']), float(row['最高']), float(row['最低'])
+                    if c < o and (h-l) > 0:
                         if (abs(o-c)/(h-l)) <= 0.12:
-                            res.append({"代码":row['代码'], "名称":row['名称'], "涨跌":row['涨跌幅']})
-                if res:
-                    st.dataframe(pd.DataFrame(res), use_container_width=True)
-                else:
-                    st.info("暂无阴线信号")
-            else:
-                st.error("数据链路断开")
+                            res_star.append({"代码":row['代码'], "名称":row['名称'], "涨跌":row.get('涨跌幅', 0)})
+                except: continue
+            st.dataframe(pd.DataFrame(res_star), use_container_width=True)
+        
+        # --- 右窗：金叉深度预警 ---
+        with col_right:
+            st.subheader("⚡ 金叉趋势扫描")
+            res_gold = []
+            top_pool = pool.sort_values('成交额', ascending=False).head(20)
+            g_progress = st.progress(0)
+            for i, (idx, row) in enumerate(top_pool.iterrows()):
+                g_progress.progress((i+1)/len(top_pool))
+                h_df_g = get_hist_with_retry(row['代码'])
+                if h_df_g is not None and len(h_df_g) >= 15:
+                    l9, h9 = h_df_g['最低'].rolling(9).min(), h_df_g['最高'].rolling(9).max()
+                    rsv = (h_df_g['收盘'] - l9) / (h9 - l9) * 100
+                    k = rsv.ewm(com=2).mean()
+                    d = k.ewm(com=2).mean()
+                    j = 3*k - 2*d
+                    if j.iloc[-1] > d.iloc[-1] and j.iloc[-2] <= d.iloc[-2]:
+                        res_gold.append({"代码":row['代码'], "名称":row['名称'], "J值":round(j.iloc[-1],2)})
+            st.dataframe(pd.DataFrame(res_gold), use_container_width=True)
     else:
-        st.info("左窗口已关闭")
-
-# --- 右窗口：金叉预警 ---
-with col_right:
-    if show_gold:
-        st.subheader("⚡ 金叉趋势预警")
-        with st.status("正在计算均线...", expanded=False):
-            df, src = get_market_data()
-            if df is not None:
-                df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
-                # 为保稳定，右窗口只扫成交额前 20 的票
-                pool = df[df['成交额'] >= vol_threshold * 100000000].sort_values('成交额', ascending=False).head(20)
-                gold_res = []
-                for _, row in pool.iterrows():
-                    h_df = get_hist_safe(row['代码'])
-                    if h_df is not None and len(h_df) >= 15:
-                        # KDJ 逻辑
-                        l9, h9 = h_df['最低'].rolling(9).min(), h_df['最高'].rolling(9).max()
-                        rsv = (h_df['收盘'] - l9) / (h9 - l9) * 100
-                        k = rsv.ewm(com=2).mean()
-                        d = k.ewm(com=2).mean()
-                        j = 3*k - 2*d
-                        if j.iloc[-1] > d.iloc[-1] and j.iloc[-2] <= d.iloc[-2]:
-                            gold_res.append({"代码":row['代码'], "名称":row['名称'], "J值":round(j.iloc[-1],2)})
-                if gold_res:
-                    st.dataframe(pd.DataFrame(gold_res), use_container_width=True)
-                else:
-                    st.info("活跃池暂无金叉")
-    else:
-        st.info("右窗口已关闭")
+        st.error("❌ 无法连接到任何行情服务器，请检查网络或点击重置。")
